@@ -1,0 +1,21 @@
+{
+  "name": "tollgate",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A provider-neutral spend gateway for AI agents paying over x402.",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -ws --if-present",
+    "test": "vitest run",
+    "typecheck": "npm run typecheck -ws --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

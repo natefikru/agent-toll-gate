@@ -1,0 +1,6 @@
+{
+  "name": "@tollgate/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local React/Vite spend dashboard for Tollgate. Not implemented yet — see tollgate-architecture.md §5.6 and build order §9 (Week 3)."
+}

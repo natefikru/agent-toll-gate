@@ -1,0 +1,6 @@
+{
+  "name": "@tollgate/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP-server front end for Tollgate. Not implemented yet — see tollgate-architecture.md §5.1 and build order §9 (Week 3)."
+}
