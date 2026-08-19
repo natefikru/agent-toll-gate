@@ -13,7 +13,8 @@
     "build": "npm run build -ws --if-present",
     "test": "vitest run",
     "test:live": "TOLLGATE_LIVE_TESTNET=1 vitest run packages/adapters/test/live-real-seller.test.ts",
-    "typecheck": "npm run typecheck -ws --if-present && tsc -p tsconfig.test.json"
+    "typecheck": "npm run typecheck -ws --if-present && tsc -p tsconfig.test.json",
+    "tollgate": "node packages/cli/dist/index.js"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
