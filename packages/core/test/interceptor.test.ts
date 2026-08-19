@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTollgate } from "../src/interceptor.js";
+import type { TollgateConfig } from "../src/types.js";
 import { MockWalletAdapter } from "../../adapters/src/mock.js";
 import { validEnvelope, validPaymentRequirements } from "./fixtures.js";
 
@@ -367,6 +368,214 @@ describe("createTollgate — single-flight", () => {
     const followUp = await tollgate.fetch(`${baseUrl}/data`);
     expect(requestCount).toBe(2); // still cached, no new network hit
     expect(await followUp.json()).toEqual({ ok: true });
+
+    tollgate.ledger.close();
+  });
+});
+
+describe("createTollgate — policy engine", () => {
+  it("denies a domain-blocked endpoint before any network call is made", async () => {
+    await listen(payHandler());
+
+    const tollgate = createTollgate({
+      wallet: new MockWalletAdapter(),
+      dbPath,
+      policy: { rules: [{ match: "127.0.0.1", action: "deny" }] },
+    });
+    await expect(tollgate.fetch(`${baseUrl}/data`)).rejects.toMatchObject({ code: "policy_denied_domain" });
+
+    expect(requestCount).toBe(0);
+    const rows = tollgate.ledger.all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].outcome).toBe("denied");
+
+    tollgate.ledger.close();
+  });
+
+  it("collapses N concurrent identical calls to a denied domain into one denied ledger row", async () => {
+    await listen(payHandler());
+
+    const tollgate = createTollgate({
+      wallet: new MockWalletAdapter(),
+      dbPath,
+      policy: { rules: [{ match: "127.0.0.1", action: "deny" }] },
+    });
+    const results = await Promise.allSettled(Array.from({ length: 5 }, () => tollgate.fetch(`${baseUrl}/data`)));
+
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    expect(requestCount).toBe(0);
+    expect(tollgate.ledger.all()).toHaveLength(1);
+
+    tollgate.ledger.close();
+  });
+
+  it("denies a domain added to the deny list after a response was already cached, rather than serving the cache", async () => {
+    await listen(payHandler());
+
+    const config: TollgateConfig = { wallet: new MockWalletAdapter(), dbPath };
+    const tollgate = createTollgate(config);
+
+    const first = await tollgate.fetch(`${baseUrl}/data`);
+    expect(first.status).toBe(200);
+    expect(requestCount).toBe(2);
+
+    // Policy tightened after the fact — domain deny must win over a warm cache.
+    config.policy = { rules: [{ match: "127.0.0.1", action: "deny" }] };
+
+    await expect(tollgate.fetch(`${baseUrl}/data`)).rejects.toMatchObject({ code: "policy_denied_domain" });
+    expect(requestCount).toBe(2); // no new network hit, but also not served from cache
+
+    tollgate.ledger.close();
+  });
+
+  it("denies via maxPerCall before ever authorizing a payment", async () => {
+    await listen(payHandler());
+
+    const tollgate = createTollgate({ wallet: new MockWalletAdapter(), dbPath, policy: { maxPerCall: "1" } });
+    await expect(tollgate.fetch(`${baseUrl}/data`)).rejects.toMatchObject({ code: "policy_denied_max_per_call" });
+
+    expect(requestCount).toBe(1); // only the unpaid 402 probe — no paid retry was ever attempted
+    expect(tollgate.ledger.all()[0].outcome).toBe("denied");
+
+    tollgate.ledger.close();
+  });
+
+  it("perTaskBudget allows a first call and denies a second that would exceed it", async () => {
+    await listen(payHandler());
+
+    const tollgate = createTollgate({ wallet: new MockWalletAdapter(), dbPath, policy: { perTaskBudget: "60000" } });
+    const first = await tollgate.fetch(`${baseUrl}/data-a`, {}, { taskId: "task-1" });
+    expect(first.status).toBe(200);
+
+    await expect(tollgate.fetch(`${baseUrl}/data-b`, {}, { taskId: "task-1" })).rejects.toMatchObject({
+      code: "policy_denied_budget",
+    });
+
+    expect(requestCount).toBe(3); // 402+retry for the first call, 402-only for the denied second
+    const rows = tollgate.ledger.all();
+    expect(rows.map((r) => r.outcome)).toEqual(["paid", "denied"]);
+
+    tollgate.ledger.close();
+  });
+
+  it("maxCallsPerTaskPerEndpoint allows N calls then denies the N+1th for the same task+endpoint", async () => {
+    await listen(payHandler());
+
+    const tollgate = createTollgate({ wallet: new MockWalletAdapter(), dbPath, policy: { maxCallsPerTaskPerEndpoint: 2 } });
+    const noCache = { headers: { "Cache-Control": "no-cache" } }; // force real repeated payments, not cache hits
+    const ctx = { taskId: "task-1" };
+
+    await tollgate.fetch(`${baseUrl}/data`, noCache, ctx);
+    await tollgate.fetch(`${baseUrl}/data`, noCache, ctx);
+    await expect(tollgate.fetch(`${baseUrl}/data`, noCache, ctx)).rejects.toMatchObject({ code: "policy_denied_max_calls" });
+
+    const rows = tollgate.ledger.all();
+    expect(rows.map((r) => r.outcome)).toEqual(["paid", "paid", "denied"]);
+
+    tollgate.ledger.close();
+  });
+
+  it("requireApprovalAbove escalates and fails closed with no onEscalate callback configured", async () => {
+    await listen(payHandler());
+
+    const tollgate = createTollgate({
+      wallet: new MockWalletAdapter(),
+      dbPath,
+      policy: { rules: [{ match: "127.0.0.1", action: "allow", requireApprovalAbove: "1" }] },
+    });
+    await expect(tollgate.fetch(`${baseUrl}/data`)).rejects.toMatchObject({ code: "policy_escalation_denied" });
+
+    expect(requestCount).toBe(1); // 402 probe only, never authorized
+    expect(tollgate.ledger.all()[0].outcome).toBe("escalated");
+
+    tollgate.ledger.close();
+  });
+
+  it("requireApprovalAbove proceeds to a real paid outcome when onEscalate approves", async () => {
+    await listen(payHandler());
+
+    const tollgate = createTollgate({
+      wallet: new MockWalletAdapter(),
+      dbPath,
+      policy: {
+        rules: [{ match: "127.0.0.1", action: "allow", requireApprovalAbove: "1" }],
+        onEscalate: async (ctx) => {
+          expect(ctx.reason).toBe("require_approval_above");
+          return true;
+        },
+      },
+    });
+    const response = await tollgate.fetch(`${baseUrl}/data`);
+
+    expect(response.status).toBe(200);
+    expect(tollgate.ledger.all()[0].outcome).toBe("paid");
+
+    tollgate.ledger.close();
+  });
+
+  it("requireApprovalAbove denies when onEscalate explicitly returns false", async () => {
+    await listen(payHandler());
+
+    const tollgate = createTollgate({
+      wallet: new MockWalletAdapter(),
+      dbPath,
+      policy: {
+        rules: [{ match: "127.0.0.1", action: "allow", requireApprovalAbove: "1" }],
+        onEscalate: async () => false,
+      },
+    });
+    await expect(tollgate.fetch(`${baseUrl}/data`)).rejects.toMatchObject({ code: "policy_escalation_denied" });
+    expect(tollgate.ledger.all()[0].outcome).toBe("escalated");
+
+    tollgate.ledger.close();
+  });
+
+  it("requireApprovalAbove fails closed when onEscalate throws", async () => {
+    await listen(payHandler());
+
+    const tollgate = createTollgate({
+      wallet: new MockWalletAdapter(),
+      dbPath,
+      policy: {
+        rules: [{ match: "127.0.0.1", action: "allow", requireApprovalAbove: "1" }],
+        onEscalate: async () => {
+          throw new Error("approval service unavailable");
+        },
+      },
+    });
+    await expect(tollgate.fetch(`${baseUrl}/data`)).rejects.toMatchObject({ code: "policy_escalation_denied" });
+    expect(tollgate.ledger.all()[0].outcome).toBe("escalated");
+
+    tollgate.ledger.close();
+  });
+
+  it("onFirstSeenEscalate escalates the first payment to a recipient, then allows a later one without escalating again", async () => {
+    await listen(payHandler());
+
+    let escalateCalls = 0;
+    const tollgate = createTollgate({
+      wallet: new MockWalletAdapter(),
+      dbPath,
+      policy: {
+        onFirstSeenEscalate: true,
+        onEscalate: async (ctx) => {
+          escalateCalls += 1;
+          expect(ctx.reason).toBe("on_first_seen");
+          return true;
+        },
+      },
+    });
+
+    const first = await tollgate.fetch(`${baseUrl}/data-a`);
+    expect(first.status).toBe(200);
+    expect(escalateCalls).toBe(1);
+
+    const second = await tollgate.fetch(`${baseUrl}/data-b`); // different endpoint, same recipient — not a cache hit
+    expect(second.status).toBe(200);
+    expect(escalateCalls).toBe(1); // not called again — recipient has now genuinely been paid
+
+    const rows = tollgate.ledger.all();
+    expect(rows.map((r) => r.outcome)).toEqual(["paid", "paid"]);
 
     tollgate.ledger.close();
   });

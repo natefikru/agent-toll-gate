@@ -8,6 +8,7 @@
  */
 export type { PaymentRequirements } from "x402/types";
 import type { PaymentRequirements } from "x402/types";
+import type { PolicyConfig } from "./policy.js";
 
 export interface Quote {
   amount: string;
@@ -59,6 +60,7 @@ export interface LedgerRow {
   amount?: string;
   asset?: string;
   network?: string;
+  recipient?: string;
   txRef?: string;
   requestHash: string;
   latencyMs: number;
@@ -67,8 +69,9 @@ export interface LedgerRow {
 export interface TollgateConfig {
   wallet: WalletAdapter;
   dbPath?: string; // default ./tollgate.db
-  cacheTtlMs?: number; // default 1 hour. One global TTL — per-endpoint override is policy-engine territory (Week 3+).
-  now?: () => number; // injectable clock for cache TTL tests; defaults to Date.now
+  cacheTtlMs?: number; // default 1 hour. One global TTL — per-endpoint override is policy-engine territory (future work).
+  now?: () => number; // injectable clock for cache TTL and policy budget-window tests; defaults to Date.now
+  policy?: PolicyConfig; // omitted = implicit allow everything (Week 1/2 behavior, unchanged)
 }
 
 export interface RequestContext {
@@ -81,7 +84,12 @@ export type TollgateErrorCode =
   | "unsupported_request_body"
   | "wallet_authorize_failed"
   | "payment_disputed"
-  | "price_mismatch";
+  | "price_mismatch"
+  | "policy_denied_domain"
+  | "policy_denied_budget"
+  | "policy_denied_max_calls"
+  | "policy_denied_max_per_call"
+  | "policy_escalation_denied";
 
 export class TollgateError extends Error {
   constructor(

@@ -3,6 +3,7 @@ import { decodeXPaymentResponse } from "x402/shared";
 import { parseX402, requirementsMatch } from "./x402.js";
 import { Ledger, generateId } from "./ledger.js";
 import { SqliteCacheStore, responseFromCacheEntry, cacheEntryFromResponse } from "./cache.js";
+import { evaluateDomainPolicy, evaluateMoneyPolicy } from "./policy.js";
 import { TollgateConfig, RequestContext, TollgateError, LedgerRow } from "./types.js";
 
 const DEFAULT_CACHE_TTL_MS = 60 * 60 * 1000;
@@ -33,6 +34,15 @@ export function createTollgate(config: TollgateConfig): Tollgate {
     requestHash: string,
     noCache: boolean,
   ): Promise<Response> {
+    // Domain rules need no payment data, so they run before any network call
+    // — including before the cache lookup, so a domain deny always overrides
+    // a stale cache entry rather than being a silent end-run around it.
+    const domainDecision = evaluateDomainPolicy(config.policy, url);
+    if (domainDecision.type === "deny") {
+      recordRow(ledger, { ctx, url, requestHash, outcome: "denied", latencyMs: 0 });
+      throw new TollgateError(domainDecision.code, domainDecision.reason);
+    }
+
     if (!noCache) {
       const cached = await cache.get(requestHash);
       if (cached) {
@@ -62,8 +72,50 @@ export function createTollgate(config: TollgateConfig): Tollgate {
 
     const requirements = await parseX402(firstResponse);
 
-    // No policy engine yet (Week 2). Implicit-allows every request that
-    // reaches this point.
+    const moneyDecision = evaluateMoneyPolicy(config.policy, ledger, { url, requirements, ctx, now });
+    if (moneyDecision.type === "deny") {
+      recordRow(ledger, {
+        ctx,
+        url,
+        requestHash,
+        outcome: "denied",
+        amount: requirements.maxAmountRequired,
+        asset: requirements.asset,
+        network: requirements.network,
+        recipient: requirements.payTo,
+        latencyMs: now() - start,
+      });
+      throw new TollgateError(moneyDecision.code, moneyDecision.reason);
+    }
+    if (moneyDecision.type === "escalate") {
+      const approved = config.policy?.onEscalate
+        ? await config.policy.onEscalate({
+            reason: moneyDecision.reason,
+            url,
+            taskId: ctx.taskId,
+            agentId: ctx.agentId,
+            amount: requirements.maxAmountRequired,
+            asset: requirements.asset,
+            network: requirements.network,
+            recipient: requirements.payTo,
+          }).catch(() => false) // fail closed — a throwing/rejecting callback is treated as a denial
+        : false; // no callback configured — fail-fast deny, per doc §5.3
+      if (!approved) {
+        recordRow(ledger, {
+          ctx,
+          url,
+          requestHash,
+          outcome: "escalated",
+          amount: requirements.maxAmountRequired,
+          asset: requirements.asset,
+          network: requirements.network,
+          recipient: requirements.payTo,
+          latencyMs: now() - start,
+        });
+        throw new TollgateError("policy_escalation_denied", `escalation (${moneyDecision.reason}) was not approved`);
+      }
+      // approved — fall through to wallet.authorize below, same as an "allow" decision
+    }
 
     let signed;
     try {
@@ -79,6 +131,7 @@ export function createTollgate(config: TollgateConfig): Tollgate {
         amount: requirements.maxAmountRequired,
         asset: requirements.asset,
         network: requirements.network,
+        recipient: requirements.payTo,
         latencyMs: now() - start,
       });
       throw new TollgateError("wallet_authorize_failed", "wallet failed to authorize payment", cause);
@@ -99,6 +152,7 @@ export function createTollgate(config: TollgateConfig): Tollgate {
           amount: requirements.maxAmountRequired,
           asset: requirements.asset,
           network: requirements.network,
+          recipient: requirements.payTo,
           txRef: signed.txRef,
           latencyMs: now() - start,
         });
@@ -118,6 +172,7 @@ export function createTollgate(config: TollgateConfig): Tollgate {
         amount: requirements.maxAmountRequired,
         asset: requirements.asset,
         network: requirements.network,
+        recipient: requirements.payTo,
         txRef: signed.txRef,
         latencyMs: now() - start,
       });
@@ -150,6 +205,7 @@ export function createTollgate(config: TollgateConfig): Tollgate {
       amount: requirements.maxAmountRequired,
       asset: requirements.asset,
       network: requirements.network,
+      recipient: requirements.payTo,
       txRef,
       latencyMs: now() - start,
     });
@@ -212,9 +268,10 @@ function recordRow(
     url: string;
     requestHash: string;
     outcome: LedgerRow["outcome"];
-    amount: string;
-    asset: string;
-    network: string;
+    amount?: string;
+    asset?: string;
+    network?: string;
+    recipient?: string;
     txRef?: string;
     latencyMs: number;
   },
@@ -229,6 +286,7 @@ function recordRow(
     amount: opts.amount,
     asset: opts.asset,
     network: opts.network,
+    recipient: opts.recipient,
     txRef: opts.txRef,
     requestHash: opts.requestHash,
     latencyMs: opts.latencyMs,
