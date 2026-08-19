@@ -1,7 +1,12 @@
 import type { PaymentRequirements } from "../src/types.js";
 
 export function validPaymentRequirements(
-  overrides: Partial<{ maxAmountRequired: string; payTo: string; asset: string; network: string }> = {},
+  overrides: Partial<{
+    maxAmountRequired: string;
+    payTo: string;
+    asset: string;
+    network: PaymentRequirements["network"];
+  }> = {},
 ): PaymentRequirements {
   return {
     scheme: "exact",

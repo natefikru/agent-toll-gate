@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { parseX402, requirementsMatch } from "../src/x402.js";
-import { TollgateError } from "../src/types.js";
 import { validEnvelope, validPaymentRequirements } from "./fixtures.js";
 
 describe("parseX402", () => {
@@ -12,17 +11,17 @@ describe("parseX402", () => {
 
   it("throws invalid_402_envelope on a schema mismatch", async () => {
     const res = new Response(JSON.stringify({ x402Version: 1, accepts: [{ nonsense: true }] }), { status: 402 });
-    await expect(parseX402(res)).rejects.toMatchObject<Partial<TollgateError>>({ code: "invalid_402_envelope" });
+    await expect(parseX402(res)).rejects.toMatchObject({ code: "invalid_402_envelope" });
   });
 
   it("throws invalid_402_envelope on non-JSON body", async () => {
     const res = new Response("not json", { status: 402 });
-    await expect(parseX402(res)).rejects.toMatchObject<Partial<TollgateError>>({ code: "invalid_402_envelope" });
+    await expect(parseX402(res)).rejects.toMatchObject({ code: "invalid_402_envelope" });
   });
 
   it("throws invalid_402_envelope when accepts is empty", async () => {
     const res = new Response(JSON.stringify({ x402Version: 1, accepts: [] }), { status: 402 });
-    await expect(parseX402(res)).rejects.toMatchObject<Partial<TollgateError>>({ code: "invalid_402_envelope" });
+    await expect(parseX402(res)).rejects.toMatchObject({ code: "invalid_402_envelope" });
   });
 });
 

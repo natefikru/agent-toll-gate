@@ -12,7 +12,8 @@
   "scripts": {
     "build": "npm run build -ws --if-present",
     "test": "vitest run",
-    "typecheck": "npm run typecheck -ws --if-present"
+    "test:live": "TOLLGATE_LIVE_TESTNET=1 vitest run packages/adapters/test/live-real-seller.test.ts",
+    "typecheck": "npm run typecheck -ws --if-present && tsc -p tsconfig.test.json"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
