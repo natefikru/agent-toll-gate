@@ -1,5 +1,5 @@
 {
-  "name": "agent-toll-booth",
+  "name": "agent-toll-gate",
   "private": true,
   "version": "0.1.0",
   "description": "A provider-neutral spend gateway for AI agents paying over x402.",

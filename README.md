@@ -1,10 +1,10 @@
-# Agent Toll Booth
+# Agent Toll Gate
 
-A provider-neutral spend gateway for AI agents paying over [x402](https://x402.org). Agent Toll Booth sits between your agent and every paid endpoint it calls: it caches, dedupes, enforces policy, pays through a pluggable wallet adapter, and records a receipt for everything.
+A provider-neutral spend gateway for AI agents paying over [x402](https://x402.org). Agent Toll Gate sits between your agent and every paid endpoint it calls: it caches, dedupes, enforces policy, pays through a pluggable wallet adapter, and records a receipt for everything.
 
-> The wallet decides *whether it is allowed to pay*. Agent Toll Booth decides *whether it needs to pay at all*, and records what happened.
+> The wallet decides *whether it is allowed to pay*. Agent Toll Gate decides *whether it needs to pay at all*, and records what happened.
 
-The code, package names, and CLI command are still called **Tollgate**/`tollgate` throughout — that's the project's original working name and its API surface, unchanged by this rename. "Agent Toll Booth" is the project's name; `createTollgate`, `@tollgate/core`, and the `tollgate` command are what you'll actually type.
+The code, package names, and CLI command are still called **Tollgate**/`tollgate` throughout — that's the project's original working name and its API surface, unchanged by this rename. "Agent Toll Gate" is the project's name; `createTollgate`, `@tollgate/core`, and the `tollgate` command are what you'll actually type.
 
 Full design rationale, scope, and build order: [`tollgate-architecture.md`](./tollgate-architecture.md). Security posture and known gaps: [`docs/THREAT-MODEL.md`](./docs/THREAT-MODEL.md).
 
