@@ -1,15 +1,13 @@
 /**
- * Simplified, vendor-neutral payment requirements. Mapped from the real x402
- * envelope in x402.ts so downstream code (WalletAdapter, Ledger) never has to
- * know about x402's on-chain-specific field names (payTo, maxAmountRequired).
+ * The real x402 payment-requirements shape, re-exported as-is rather than
+ * mapped onto a hand-rolled type. Week 1 stripped this down to
+ * price/asset/network/recipient and it turned out to be lossy: real EIP-3009
+ * signing needs resource/description/mimeType/maxTimeoutSeconds/extra too
+ * (extra carries the EIP-712 domain for the asset contract). One real type,
+ * no drift risk against the spec.
  */
-export interface PaymentRequirements {
-  price: string; // decimal string, e.g. "0.05" — never a number, this is money
-  asset: string; // e.g. "USDC"
-  network: string; // e.g. "base-sepolia"
-  recipient: string;
-  facilitator?: string;
-}
+export type { PaymentRequirements } from "x402/types";
+import type { PaymentRequirements } from "x402/types";
 
 export interface Quote {
   amount: string;
@@ -17,9 +15,17 @@ export interface Quote {
   network: string;
 }
 
+/**
+ * `header` is the ready-to-send X-PAYMENT value — only the wallet adapter
+ * knows how to produce a spec-compliant encoding, so Tollgate never encodes
+ * it itself. `txRef` is optional: x402's exact-EVM scheme is an offline
+ * pre-signed authorization, so a real adapter doesn't know the settlement
+ * tx hash at authorize-time — that only appears later via the seller's
+ * X-PAYMENT-RESPONSE header. A mock adapter can supply one immediately.
+ */
 export interface SignedPayload {
-  payload: unknown;
-  txRef: string;
+  header: string;
+  txRef?: string;
 }
 
 export interface Balance {
@@ -29,16 +35,19 @@ export interface Balance {
 
 /**
  * Deliberately narrow so a third implementation is an afternoon of work.
- * Tollgate never sees a private key: it sees a signed payload and a tx ref.
+ * Tollgate never sees a private key: it sees a signed header and (usually)
+ * a tx ref.
  */
 export interface WalletAdapter {
   quote(req: PaymentRequirements): Promise<Quote>;
   authorize(req: PaymentRequirements): Promise<SignedPayload>;
-  balance(): Promise<Balance>;
+  balance(address?: string): Promise<Balance>;
 }
 
-// cache_hit is deferred to Week 2 — there is no cache yet.
-export type LedgerOutcome = "paid" | "denied" | "escalated" | "disputed";
+// Spend-aggregation convention: only "paid" rows represent real money that
+// left the wallet. "cache_hit" rows carry the original amount/asset/network
+// purely to show what was saved — never sum them alongside "paid" rows.
+export type LedgerOutcome = "paid" | "cache_hit" | "denied" | "escalated" | "disputed";
 
 export interface LedgerRow {
   id: string;
@@ -58,6 +67,8 @@ export interface LedgerRow {
 export interface TollgateConfig {
   wallet: WalletAdapter;
   dbPath?: string; // default ./tollgate.db
+  cacheTtlMs?: number; // default 1 hour. One global TTL — per-endpoint override is policy-engine territory (Week 3+).
+  now?: () => number; // injectable clock for cache TTL tests; defaults to Date.now
 }
 
 export interface RequestContext {

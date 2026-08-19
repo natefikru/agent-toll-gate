@@ -1,36 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { parseX402, requirementsMatch } from "../src/x402.js";
 import { TollgateError } from "../src/types.js";
-
-function validEnvelope(overrides: Partial<{ maxAmountRequired: string; payTo: string; asset: string; network: string }> = {}) {
-  return {
-    x402Version: 1,
-    accepts: [
-      {
-        scheme: "exact",
-        network: overrides.network ?? "base-sepolia",
-        maxAmountRequired: overrides.maxAmountRequired ?? "50000",
-        resource: "https://api.example.com/data",
-        description: "test resource",
-        mimeType: "application/json",
-        payTo: overrides.payTo ?? "0x1111111111111111111111111111111111111111",
-        maxTimeoutSeconds: 60,
-        asset: overrides.asset ?? "0x2222222222222222222222222222222222222222",
-      },
-    ],
-  };
-}
+import { validEnvelope, validPaymentRequirements } from "./fixtures.js";
 
 describe("parseX402", () => {
-  it("parses a valid envelope into the simplified internal shape", async () => {
+  it("parses a valid envelope into the real x402 requirements shape", async () => {
     const res = new Response(JSON.stringify(validEnvelope()), { status: 402 });
     const requirements = await parseX402(res);
-    expect(requirements).toEqual({
-      price: "50000",
-      asset: "0x2222222222222222222222222222222222222222",
-      network: "base-sepolia",
-      recipient: "0x1111111111111111111111111111111111111111",
-    });
+    expect(requirements).toEqual(validPaymentRequirements());
   });
 
   it("throws invalid_402_envelope on a schema mismatch", async () => {
@@ -51,17 +28,25 @@ describe("parseX402", () => {
 
 describe("requirementsMatch", () => {
   it("returns true for identical requirements", () => {
-    const a = { price: "1", asset: "USDC", network: "base", recipient: "0xabc" };
-    expect(requirementsMatch(a, { ...a })).toBe(true);
+    const a = validPaymentRequirements();
+    expect(requirementsMatch(a, validPaymentRequirements())).toBe(true);
   });
 
-  it("returns false when the price differs", () => {
-    const a = { price: "1", asset: "USDC", network: "base", recipient: "0xabc" };
-    expect(requirementsMatch(a, { ...a, price: "2" })).toBe(false);
+  it("returns false when the amount differs", () => {
+    const a = validPaymentRequirements();
+    expect(requirementsMatch(a, validPaymentRequirements({ maxAmountRequired: "99999" }))).toBe(false);
   });
 
-  it("returns false when only the recipient differs (asset/recipient swap)", () => {
-    const a = { price: "1", asset: "USDC", network: "base", recipient: "0xabc" };
-    expect(requirementsMatch(a, { ...a, recipient: "0xdef" })).toBe(false);
+  it("returns false when only the recipient (payTo) differs", () => {
+    const a = validPaymentRequirements();
+    expect(
+      requirementsMatch(a, validPaymentRequirements({ payTo: "0x9999999999999999999999999999999999999999" })),
+    ).toBe(false);
+  });
+
+  it("returns true when only metadata (description) differs — not economically significant", () => {
+    const a = validPaymentRequirements();
+    const b = { ...validPaymentRequirements(), description: "a different description" };
+    expect(requirementsMatch(a, b)).toBe(true);
   });
 });

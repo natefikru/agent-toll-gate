@@ -1,30 +1,57 @@
 import { createHash } from "node:crypto";
+import { decodeXPaymentResponse } from "x402/shared";
 import { parseX402, requirementsMatch } from "./x402.js";
 import { Ledger, generateId } from "./ledger.js";
+import { SqliteCacheStore, responseFromCacheEntry, cacheEntryFromResponse } from "./cache.js";
 import { TollgateConfig, RequestContext, TollgateError, LedgerRow } from "./types.js";
+
+const DEFAULT_CACHE_TTL_MS = 60 * 60 * 1000;
 
 export interface Tollgate {
   fetch(url: string, init?: RequestInit, ctx?: RequestContext): Promise<Response>;
   ledger: Ledger;
 }
 
+function isNoCache(init: RequestInit): boolean {
+  return new Headers(init.headers).get("cache-control") === "no-cache";
+}
+
 export function createTollgate(config: TollgateConfig): Tollgate {
   const ledger = new Ledger(config.dbPath);
+  const cache = new SqliteCacheStore(ledger.database, config.now);
   const wallet = config.wallet;
+  const cacheTtlMs = config.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  const now = config.now ?? Date.now;
 
-  async function tollgateFetch(url: string, init: RequestInit = {}, ctx: RequestContext = {}): Promise<Response> {
-    const method = init.method ?? "GET";
+  // Per-process only — the doc's cross-fleet dedup via Redis is future work.
+  const inFlight = new Map<string, Promise<Response>>();
 
-    // Week 1 only supports string bodies (or none) — streamed/FormData bodies
-    // are out of scope; buffering once here keeps the same body usable for
-    // both the initial unpaid attempt and the paid retry.
-    if (init.body !== undefined && typeof init.body !== "string") {
-      throw new TollgateError("unsupported_request_body", "Tollgate MVP only supports string request bodies");
+  async function runLifecycle(
+    url: string,
+    init: RequestInit,
+    ctx: RequestContext,
+    requestHash: string,
+    noCache: boolean,
+  ): Promise<Response> {
+    if (!noCache) {
+      const cached = await cache.get(requestHash);
+      if (cached) {
+        recordRow(ledger, {
+          ctx,
+          url,
+          requestHash,
+          outcome: "cache_hit",
+          amount: cached.amount,
+          asset: cached.asset,
+          network: cached.network,
+          txRef: cached.txRef,
+          latencyMs: 0,
+        });
+        return responseFromCacheEntry(cached);
+      }
     }
-    const body = init.body as string | undefined;
-    const requestHash = createHash("sha256").update(`${method}:${url}:${body ?? ""}`).digest("hex");
 
-    const start = Date.now();
+    const start = now();
     const firstResponse = await fetch(url, init);
 
     if (firstResponse.status !== 402) {
@@ -35,8 +62,8 @@ export function createTollgate(config: TollgateConfig): Tollgate {
 
     const requirements = await parseX402(firstResponse);
 
-    // No policy engine yet (Week 2). Week 1 implicit-allows every request
-    // that reaches this point.
+    // No policy engine yet (Week 2). Implicit-allows every request that
+    // reaches this point.
 
     let signed;
     try {
@@ -49,17 +76,17 @@ export function createTollgate(config: TollgateConfig): Tollgate {
         url,
         requestHash,
         outcome: "denied",
-        requirements,
-        latencyMs: Date.now() - start,
+        amount: requirements.maxAmountRequired,
+        asset: requirements.asset,
+        network: requirements.network,
+        latencyMs: now() - start,
       });
       throw new TollgateError("wallet_authorize_failed", "wallet failed to authorize payment", cause);
     }
 
-    const paymentHeader = Buffer.from(JSON.stringify(signed.payload)).toString("base64");
-    const retryResponse = await fetch(url, {
-      ...init,
-      headers: { ...init.headers, "X-PAYMENT": paymentHeader },
-    });
+    const retryHeaders = new Headers(init.headers);
+    retryHeaders.set("X-PAYMENT", signed.header);
+    const retryResponse = await fetch(url, { ...init, headers: retryHeaders });
 
     if (retryResponse.status === 402) {
       const retryRequirements = await parseX402(retryResponse.clone());
@@ -69,9 +96,11 @@ export function createTollgate(config: TollgateConfig): Tollgate {
           url,
           requestHash,
           outcome: "disputed",
-          requirements,
+          amount: requirements.maxAmountRequired,
+          asset: requirements.asset,
+          network: requirements.network,
           txRef: signed.txRef,
-          latencyMs: Date.now() - start,
+          latencyMs: now() - start,
         });
         throw new TollgateError(
           "price_mismatch",
@@ -86,9 +115,11 @@ export function createTollgate(config: TollgateConfig): Tollgate {
         url,
         requestHash,
         outcome: "disputed",
-        requirements,
+        amount: requirements.maxAmountRequired,
+        asset: requirements.asset,
+        network: requirements.network,
         txRef: signed.txRef,
-        latencyMs: Date.now() - start,
+        latencyMs: now() - start,
       });
       throw new TollgateError(
         "payment_disputed",
@@ -96,19 +127,82 @@ export function createTollgate(config: TollgateConfig): Tollgate {
       );
     }
 
+    const txRef = decodeSettlementTxRef(retryResponse) ?? signed.txRef;
+
+    if (!noCache) {
+      const cacheable = retryResponse.clone();
+      const entry = await cacheEntryFromResponse(cacheable, {
+        amount: requirements.maxAmountRequired,
+        asset: requirements.asset,
+        network: requirements.network,
+        txRef,
+        ttlMs: cacheTtlMs,
+        now,
+      });
+      await cache.set(requestHash, entry);
+    }
+
     recordRow(ledger, {
       ctx,
       url,
       requestHash,
       outcome: "paid",
-      requirements,
-      txRef: signed.txRef,
-      latencyMs: Date.now() - start,
+      amount: requirements.maxAmountRequired,
+      asset: requirements.asset,
+      network: requirements.network,
+      txRef,
+      latencyMs: now() - start,
     });
     return retryResponse;
   }
 
+  async function tollgateFetch(url: string, init: RequestInit = {}, ctx: RequestContext = {}): Promise<Response> {
+    const method = init.method ?? "GET";
+
+    // Week 1 only supports string bodies (or none) — streamed/FormData bodies
+    // are out of scope; buffering once here keeps the same body usable for
+    // both the initial unpaid attempt and the paid retry.
+    if (init.body !== undefined && typeof init.body !== "string") {
+      throw new TollgateError("unsupported_request_body", "Tollgate MVP only supports string request bodies");
+    }
+    const body = init.body as string | undefined;
+    const requestHash = createHash("sha256").update(`${method}:${url}:${body ?? ""}`).digest("hex");
+    const noCache = isNoCache(init);
+
+    // no-cache bypasses both the cache AND single-flight dedup — always runs
+    // its own independent lifecycle.
+    if (noCache) {
+      return runLifecycle(url, init, ctx, requestHash, true);
+    }
+
+    // Single-flight: the map check-and-install must be the very first
+    // synchronous operation for a given hash — cache lookup happens *inside*
+    // the guarded promise, not before it. Checking the map after an `await`
+    // (e.g. after the cache lookup) leaves a race window where two
+    // concurrent callers both see a miss before either installs anything.
+    const existing = inFlight.get(requestHash);
+    if (existing) return existing;
+
+    const promise = runLifecycle(url, init, ctx, requestHash, false).finally(() => {
+      inFlight.delete(requestHash);
+    });
+    inFlight.set(requestHash, promise);
+    return promise;
+  }
+
   return { fetch: tollgateFetch, ledger };
+}
+
+function decodeSettlementTxRef(res: Response): string | undefined {
+  const header = res.headers.get("X-PAYMENT-RESPONSE");
+  if (!header) return undefined;
+  try {
+    return decodeXPaymentResponse(header).transaction;
+  } catch {
+    // Malformed header — fall back to the wallet's own txRef rather than
+    // failing an otherwise-successful paid request.
+    return undefined;
+  }
 }
 
 function recordRow(
@@ -118,7 +212,9 @@ function recordRow(
     url: string;
     requestHash: string;
     outcome: LedgerRow["outcome"];
-    requirements: { price: string; asset: string; network: string };
+    amount: string;
+    asset: string;
+    network: string;
     txRef?: string;
     latencyMs: number;
   },
@@ -130,9 +226,9 @@ function recordRow(
     agentId: opts.ctx.agentId,
     endpoint: opts.url,
     outcome: opts.outcome,
-    amount: opts.requirements.price,
-    asset: opts.requirements.asset,
-    network: opts.requirements.network,
+    amount: opts.amount,
+    asset: opts.asset,
+    network: opts.network,
     txRef: opts.txRef,
     requestHash: opts.requestHash,
     latencyMs: opts.latencyMs,

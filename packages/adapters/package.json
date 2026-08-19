@@ -10,6 +10,8 @@
     "typecheck": "tsc -b tsconfig.json"
   },
   "dependencies": {
-    "@tollgate/core": "*"
+    "@tollgate/core": "*",
+    "viem": "^2.21.0",
+    "x402": "^1.2.0"
   }
 }

@@ -14,8 +14,11 @@ export function generateId(): string {
 export class Ledger {
   private db: Database.Database;
 
-  constructor(dbPath = "./tollgate.db") {
-    this.db = new Database(dbPath);
+  /** Accepts either a path (opens its own connection) or an already-open
+   * Database instance to share with other stores (e.g. SqliteCacheStore) —
+   * avoids two separate connections to the same SQLite file. */
+  constructor(dbOrPath: Database.Database | string = "./tollgate.db") {
+    this.db = typeof dbOrPath === "string" ? new Database(dbOrPath) : dbOrPath;
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS ledger (
         id TEXT PRIMARY KEY,
@@ -49,6 +52,12 @@ export class Ledger {
         network: row.network ?? null,
         txRef: row.txRef ?? null,
       });
+  }
+
+  /** Exposes the underlying connection so other stores (SqliteCacheStore)
+   * can share it instead of opening a second connection to the same file. */
+  get database(): Database.Database {
+    return this.db;
   }
 
   /** Exists for tests to assert on written rows. No query/report surface

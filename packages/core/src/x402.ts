@@ -1,10 +1,11 @@
-import { x402ResponseSchema, type PaymentRequirements as X402PaymentRequirements } from "x402/types";
+import { x402ResponseSchema } from "x402/types";
 import { PaymentRequirements, TollgateError } from "./types.js";
 
 /**
  * Parses and validates a 402 response body against the real x402 envelope
- * schema, then maps it onto Tollgate's simplified internal shape so the
- * rest of the codebase (WalletAdapter, Ledger) stays protocol-detail-free.
+ * schema and returns the accepted payment requirements as-is (no lossy
+ * mapping — the real shape, including `extra`, is what a wallet adapter
+ * needs to actually sign a payment).
  *
  * A 402 body can offer multiple accepted payment options (`accepts`). Week 1
  * just takes the first one — picking the cheapest/best option across schemes
@@ -28,23 +29,21 @@ export async function parseX402(res: Response): Promise<PaymentRequirements> {
     throw new TollgateError("invalid_402_envelope", "402 response listed no accepted payment requirements");
   }
 
-  return toInternal(accepted);
-}
-
-function toInternal(req: X402PaymentRequirements): PaymentRequirements {
-  return {
-    price: req.maxAmountRequired,
-    asset: req.asset,
-    network: req.network,
-    recipient: req.payTo,
-  };
+  return accepted;
 }
 
 /**
  * Compares two requirements for the price-manipulation check (doc §6 #3):
- * a seller returning a higher price, different asset, or different
- * recipient on the payment retry than in the original 402 must abort.
+ * a seller returning a higher price, different asset, network, or recipient
+ * on the payment retry than in the original 402 must abort. Only the
+ * economically significant fields are compared — resource/description/
+ * mimeType are metadata, not something a price-manipulation check cares about.
  */
 export function requirementsMatch(a: PaymentRequirements, b: PaymentRequirements): boolean {
-  return a.price === b.price && a.asset === b.asset && a.network === b.network && a.recipient === b.recipient;
+  return (
+    a.maxAmountRequired === b.maxAmountRequired &&
+    a.asset === b.asset &&
+    a.network === b.network &&
+    a.payTo === b.payTo
+  );
 }
